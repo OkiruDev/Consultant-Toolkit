@@ -463,21 +463,37 @@ export async function registerRoutes(
         context?: { meetings?: number; tasks?: number; pendingTasks?: number };
       };
 
-      const systemPrompt = `You are the Okiru Companion AI Assistant — a smart, professional assistant for Okiru consultants. You help with:
-- Scheduling and managing meetings (Google Meet, Teams, Zoom, Zoho Meeting)
-- Taking and reviewing meeting notes and minutes
-- Managing tasks, deadlines, and project timelines
-- Navigating the Okiru Companion platform
-- B-BBEE compliance queries and calculations
-- Sending reminders and calendar management
-- Zoho One integration (CRM, Projects, Calendar)
+      const systemPrompt = `You are the Okiru Companion AI — an intelligent executive assistant for Okiru consultants working in B-BBEE compliance, corporate governance, and company secretarial practice in South Africa.
+
+PERSONALITY: Proactive, precise, and professional. You think like a Chief of Staff — anticipating needs, prioritising ruthlessly, and surfacing what matters most. You are direct without being curt.
+
+CORE CAPABILITIES:
+- Meeting intelligence: draft agendas, produce minutes, extract action items, track resolutions
+- Task & deadline management: identify overdue items, flag risks, suggest reprioritisation using urgency × importance (Eisenhower Matrix)
+- B-BBEE expertise: explain scoring, thresholds, ownership calculations, QSE vs generic scorecard, BEE codes, sector charters
+- Company secretarial practice: AGM/EGM procedure, Companies Act (71 of 2008) compliance, King IV principles, MOI amendments
+- Document guidance: help locate, structure, or draft governance documents and board packs
+- Learning: explain concepts, walk through frameworks, provide practical examples
+- Prioritisation coaching: when asked what to do next, synthesise context into 3 clear next actions with reasoning
+
+SMART BEHAVIOURS:
+- "Pick up where I left off" → analyse task + meeting context provided, give TOP 3 priority actions with deadlines
+- "Check deliverables" → identify what's overdue or at risk, state the consequence, recommend the immediate action
+- "Find a document" → ask clarifying questions: what type, which company, which date range
+- "Learn a skill" → present a numbered menu of relevant topics, then teach the chosen one step by step
+- "What to prioritise" → use urgency × importance framing, be specific about WHY each item ranks where it does
+
+RESPONSE STYLE:
+- Lead with the most important point first
+- Use bullet points for 3+ items; bold key terms and **deadlines**
+- Keep answers concise unless depth is requested — a sharp paragraph beats a wall of text
+- End action-oriented responses with "What would you like to tackle first?" if there are clear follow-ups
+- For B-BBEE answers, cite the relevant code section or gazette where applicable
 
 Current workspace context:
-${context?.meetings !== undefined ? `- Meetings recorded: ${context.meetings}` : ''}
+${context?.meetings !== undefined ? `- Meetings on record: ${context.meetings}` : ''}
 ${context?.tasks !== undefined ? `- Total tasks: ${context.tasks}` : ''}
-${context?.pendingTasks !== undefined ? `- Pending tasks: ${context.pendingTasks}` : ''}
-
-You are helpful, concise, and action-oriented. When the user asks you to do something (like "create a task" or "schedule a meeting"), provide a clear, actionable response and indicate what information is needed. Format responses clearly — use bullet points and short paragraphs. Keep responses focused and professional.`;
+${context?.pendingTasks !== undefined ? `- Pending/in-progress tasks: ${context.pendingTasks}` : ''}`;
 
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -488,7 +504,7 @@ You are helpful, concise, and action-oriented. When the user asks you to do some
 
       const stream = anthropic.messages.stream({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
+        max_tokens: 2048,
         system: systemPrompt,
         messages,
       });
@@ -515,6 +531,70 @@ You are helpful, concise, and action-oriented. When the user asks you to do some
       res.end();
     }
   });
+
+  // ── Voice: Speech-to-Text (OpenAI Whisper) ───────────────────────────────────
+
+  app.post('/api/voice/transcribe', requireAuth, async (req: Request, res: Response) => {
+    try {
+      if (!process.env.OPENAI_API_KEY) {
+        return res.status(503).json({ message: "OPENAI_API_KEY not configured" });
+      }
+      const { audio, mimeType = 'audio/webm' } = req.body as { audio: string; mimeType?: string };
+      if (!audio) return res.status(400).json({ message: "No audio provided" });
+
+      const buffer = Buffer.from(audio, 'base64');
+      const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm';
+
+      const formData = new FormData();
+      const blob = new Blob([buffer], { type: mimeType });
+      formData.append('file', blob, `audio.${ext}`);
+      formData.append('model', 'whisper-1');
+      formData.append('language', 'en');
+
+      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: formData as any,
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json() as { text: string };
+      return res.json({ transcript: data.text });
+    } catch (error: any) {
+      console.error('Transcription error:', error.message);
+      return res.status(500).json({ message: error.message || 'Transcription failed' });
+    }
+  });
+
+  // ── Voice: Text-to-Speech (OpenAI TTS) ───────────────────────────────────────
+
+  app.post('/api/voice/speak', requireAuth, async (req: Request, res: Response) => {
+    try {
+      if (!process.env.OPENAI_API_KEY) {
+        return res.status(503).json({ message: "OPENAI_API_KEY not configured" });
+      }
+      const { text, voice = 'nova' } = req.body as { text: string; voice?: string };
+      if (!text) return res.status(400).json({ message: "No text provided" });
+
+      const response = await fetch('https://api.openai.com/v1/audio/speech', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ model: 'tts-1', input: text.slice(0, 4096), voice, response_format: 'mp3' }),
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+      res.setHeader('Content-Type', 'audio/mpeg');
+      const buf = Buffer.from(await response.arrayBuffer());
+      return res.send(buf);
+    } catch (error: any) {
+      console.error('TTS error:', error.message);
+      return res.status(500).json({ message: error.message || 'TTS failed' });
+    }
+  });
+
 
   // ── Meeting Minutes ──────────────────────────────────────────────────────────
 
